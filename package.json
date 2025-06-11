@@ -1,6 +1,6 @@
 {
   "name": "AIScraper",
-  "version": "2.3.1",
+  "version": "2.6.0",
   "description": "使用AI并行整理媒体文件，合并系列，并为Jellyfin创建标准化的软/硬链接。",
   "main": "dist/index.js",
   "type": "module",

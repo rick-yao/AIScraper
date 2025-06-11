@@ -2,6 +2,7 @@ import path from 'path';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { generateObject } from 'ai';
 import { z } from 'zod';
+import { StatsCollector } from './stats.js'; // 导入统计收集器
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
@@ -38,13 +39,15 @@ function buildVideoPrompt(filename: string, parentDir: string): string {
   return `你是一个为Plex和Jellyfin服务的媒体文件整理专家。你的任务是分析视频文件名及其父目录，以提取结构化信息。请分析以下文件：\n- 文件名: "${filename}"\n- 父目录: "${parentDir}"\n请严格遵守规则：1.判断文件是电视剧集还是电影。2.对于电视剧，提取剧名、季号和集号。3.对于电影，提取电影名和上映年份。4. 'title'应为电视剧或电影的干净名称，删除所有附加信息。5.如果无法确定，将'type'设置为'unknown'。返回一个与所提供Schema匹配的JSON对象。`;
 }
 
-async function getMediaInfo(filename: string, parentDir: string): Promise<MediaInfo | null> {
+// 修改：增加 stats 参数
+async function getMediaInfo(filename: string, parentDir: string, stats: StatsCollector): Promise<MediaInfo | null> {
   try {
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: google('models/gemini-1.5-flash'),
       schema: mediaInfoSchema,
       prompt: buildVideoPrompt(filename, parentDir),
     });
+    stats.addRequest(usage); // 记录 token 使用情况
     return object;
   } catch (error) {
     console.error(`[错误] 在分析视频 "${filename}" 时调用AI失败:`, error);
@@ -52,12 +55,13 @@ async function getMediaInfo(filename: string, parentDir: string): Promise<MediaI
   }
 }
 
-export async function analyzeAndFormatFilename(originalFilename: string, parentDir: string): Promise<AnalysisResult> {
+// 修改：增加 stats 参数并传递下去
+export async function analyzeAndFormatFilename(originalFilename: string, parentDir: string, stats: StatsCollector): Promise<AnalysisResult> {
   const filenameWithoutExt = path.parse(originalFilename).name;
   const extension = path.parse(originalFilename).ext;
 
   if (!extension) return { newFilename: null, aiInfo: null };
-  const info = await getMediaInfo(filenameWithoutExt, parentDir);
+  const info = await getMediaInfo(filenameWithoutExt, parentDir, stats);
   if (!info) return { newFilename: null, aiInfo: null };
 
   const newFilename = formatNewFilename(info, extension);
@@ -84,13 +88,15 @@ function buildAuxiliaryPrompt(standardBaseName: string, auxiliaryFilename: strin
     请只返回一个符合Schema的JSON对象。`;
 }
 
-export async function analyzeAuxiliaryFileRole(standardBaseName: string, auxiliaryFilename: string): Promise<string | null> {
+// 修改：增加 stats 参数
+export async function analyzeAuxiliaryFileRole(standardBaseName: string, auxiliaryFilename: string, stats: StatsCollector): Promise<string | null> {
   try {
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: google('models/gemini-1.5-flash'),
       schema: auxFileRoleSchema,
       prompt: buildAuxiliaryPrompt(standardBaseName, auxiliaryFilename),
     });
+    stats.addRequest(usage); // 记录 token 使用情况
     return object.role;
   } catch (error) {
     console.error(`[错误] 在分析辅助文件 "${auxiliaryFilename}" 时调用AI失败:`, error);
@@ -98,7 +104,7 @@ export async function analyzeAuxiliaryFileRole(standardBaseName: string, auxilia
   }
 }
 
-// --- 新增：宏观标题整理 ---
+// --- 宏观标题整理 ---
 
 const canonicalTitleSchema = z.record(z.string(), z.string().describe("最终的、标准的英文剧集标题。"));
 
@@ -114,19 +120,16 @@ function buildCanonicalTitlePrompt(titles: string[]): string {
   对于像 "DAN.DA.DAN" 和 "DAN DA DAN" 这样的，请统一为 "Dan Da Dan"。`;
 }
 
-/**
- * 新增函数：获取原始标题到官方标题的映射
- * @param titles - 从文件中分析出的所有唯一标题的列表
- * @returns {Promise<Record<string, string> | null>} - 一个映射对象
- */
-export async function getCanonicalTitleMapping(titles: string[]): Promise<Record<string, string> | null> {
+// 修改：增加 stats 参数
+export async function getCanonicalTitleMapping(titles: string[], stats: StatsCollector): Promise<Record<string, string> | null> {
   try {
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: google('models/gemini-1.5-flash'),
       schema: canonicalTitleSchema,
       prompt: buildCanonicalTitlePrompt(titles),
       mode: 'json'
     });
+    stats.addRequest(usage); // 记录 token 使用情况
     return object;
   } catch (error) {
     console.error('[错误] 在进行宏观标题整理时调用 AI 失败:', error);

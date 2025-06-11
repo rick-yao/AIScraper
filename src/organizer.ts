@@ -2,11 +2,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import { analyzeAndFormatFilename, analyzeAuxiliaryFileRole, getCanonicalTitleMapping } from './nameParser.js';
 import { MediaBlueprint, EpisodeOrMovie, MediaFile, MediaSeries } from './types.js';
+import { StatsCollector } from './stats.js'; // 导入统计收集器
 
 const VIDEO_EXTENSIONS = new Set(['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.rmvb']);
 const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.ssa', '.srt', '.sub', '.sup', '.vtt', '.lrc']);
 
-async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency: number): Promise<void> {
+// 修改：增加 stats 参数
+async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency: number, stats: StatsCollector): Promise<void> {
   console.log(`[扫描] 进入目录: ${dir}`);
   let entries;
   try {
@@ -49,12 +51,14 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
 
     const promises = chunk.map(async ({ videoFile, sidecarFiles }) => {
       const parentDir = path.basename(path.dirname(videoFile.sourcePath));
-      const analysisResult = await analyzeAndFormatFilename(videoFile.originalFilename, parentDir);
+      // 传递 stats
+      const analysisResult = await analyzeAndFormatFilename(videoFile.originalFilename, parentDir, stats);
 
       if (!analysisResult.aiInfo || !analysisResult.newFilename) return null;
 
       const sidecarPromises = sidecarFiles.map(async (file) => {
-        const role = await analyzeAuxiliaryFileRole(analysisResult.newFilename!, file.originalFilename);
+        // 传递 stats
+        const role = await analyzeAuxiliaryFileRole(analysisResult.newFilename!, file.originalFilename, stats);
         file.role = role;
         return file;
       });
@@ -83,7 +87,8 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
 
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      await scanDirectory(path.join(dir, entry.name), blueprint, concurrency);
+      // 传递 stats
+      await scanDirectory(path.join(dir, entry.name), blueprint, concurrency, stats);
     }
   }
 }
@@ -107,10 +112,13 @@ function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
   }
 }
 
-async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<MediaBlueprint> {
+// 修改：增加 stats 参数
+async function consolidateBlueprint(rawBlueprint: MediaBlueprint, stats: StatsCollector): Promise<MediaBlueprint> {
   const titles = Object.keys(rawBlueprint);
   if (titles.length === 0) return {};
-  const canonicalTitleMap = await getCanonicalTitleMapping(titles);
+
+  // 传递 stats
+  const canonicalTitleMap = await getCanonicalTitleMapping(titles, stats);
   if (!canonicalTitleMap) {
     console.error('[错误] 无法从 AI 获取标题映射，将跳过整理步骤。');
     return rawBlueprint;
@@ -143,6 +151,7 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
   }
   return finalBlueprint;
 }
+
 
 async function createLink(source: string, destination: string, linkType: string, pathMode: string): Promise<void> {
   let linkSource = source;
@@ -205,20 +214,22 @@ async function generateLinks(blueprint: MediaBlueprint, targetRootDir: string, l
   }
 }
 
-export async function organizeMediaLibrary(sourceDirs: string[], targetDir: string, isDebugMode: boolean, concurrency: number, linkType: string, pathMode: string): Promise<void> {
+// 修改：增加 stats 参数
+export async function organizeMediaLibrary(sourceDirs: string[], targetDir: string, isDebugMode: boolean, concurrency: number, linkType: string, pathMode: string, stats: StatsCollector): Promise<void> {
   console.log('--- 阶段 1: 开始扫描和分析文件... ---');
   const rawBlueprint: MediaBlueprint = {};
   for (const sourceDir of sourceDirs) {
-    await scanDirectory(sourceDir, rawBlueprint, concurrency);
+    // 传递 stats
+    await scanDirectory(sourceDir, rawBlueprint, concurrency, stats);
   }
   console.log('--- 阶段 1: 完成 ---');
 
   console.log('\n--- 阶段 2: 开始进行 AI 宏观整理... ---');
-  const finalBlueprint = await consolidateBlueprint(rawBlueprint);
+  // 传递 stats
+  const finalBlueprint = await consolidateBlueprint(rawBlueprint, stats);
   console.log('--- 阶段 2: 完成 ---');
 
   if (isDebugMode) {
-    // 更新：使用 process.cwd() 获取当前执行目录
     const debugFilePath = path.join(process.cwd(), 'debug_log_organized.json');
     console.log(`\n--- 调试模式: 将把最终的整理计划写入当前执行目录: ${debugFilePath} ---`);
     try {
