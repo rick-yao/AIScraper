@@ -167,7 +167,7 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
 // --- 阶段三: 生成最终目录结构 ---
 
 // ++++++++++ 新增：定义需要保持同名的文件扩展名 ++++++++++
-const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.srt', '.sup']);
+const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.ssa', '.srt', '.sub', '.sup', '.vtt', '.lrc']);
 // +++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
