@@ -4,8 +4,7 @@ import { analyzeAndFormatFilename, analyzeAuxiliaryFileRole, getCanonicalTitleMa
 import { MediaBlueprint, EpisodeOrMovie, MediaFile, MediaSeries } from './types.js';
 
 const VIDEO_EXTENSIONS = new Set(['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.rmvb']);
-
-// --- 阶段一: 扫描与初步分析 ---
+const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.ssa', '.srt', '.sub', '.sup', '.vtt', '.lrc']);
 
 async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency: number): Promise<void> {
   console.log(`[扫描] 进入目录: ${dir}`);
@@ -91,7 +90,6 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
 
 function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
   if (item.aiInfo.type === 'unknown') return;
-
   const title = item.aiInfo.title;
   if (!blueprint[title]) {
     blueprint[title] = {
@@ -109,33 +107,19 @@ function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
   }
 }
 
-// --- 阶段二: AI 驱动的宏观整理 ---
-
 async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<MediaBlueprint> {
   const titles = Object.keys(rawBlueprint);
-  if (titles.length === 0) {
-    return {};
-  }
-
-  console.log('[整理] 发现以下初步标题:', titles);
-  console.log('[整理] 正在调用 AI 进行最终的标题合并...');
-
+  if (titles.length === 0) return {};
   const canonicalTitleMap = await getCanonicalTitleMapping(titles);
   if (!canonicalTitleMap) {
     console.error('[错误] 无法从 AI 获取标题映射，将跳过整理步骤。');
     return rawBlueprint;
   }
-
-  console.log('[整理] AI 返回的整理计划:', canonicalTitleMap);
-
   const finalBlueprint: MediaBlueprint = {};
-
   for (const originalTitle in canonicalTitleMap) {
     const canonicalTitle = canonicalTitleMap[originalTitle];
     const seriesToMerge = rawBlueprint[originalTitle];
-
     if (!seriesToMerge) continue;
-
     if (!finalBlueprint[canonicalTitle]) {
       finalBlueprint[canonicalTitle] = {
         canonicalTitle: canonicalTitle,
@@ -145,13 +129,11 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
         type: seriesToMerge.type,
       };
     }
-
     const targetSeries = finalBlueprint[canonicalTitle];
     targetSeries.items.push(...seriesToMerge.items);
     Object.assign(targetSeries.titleVotes, seriesToMerge.titleVotes);
     Object.assign(targetSeries.yearVotes, seriesToMerge.yearVotes);
   }
-
   for (const series of Object.values(finalBlueprint)) {
     const yearVotes = series.yearVotes;
     if (Object.keys(yearVotes).length > 0) {
@@ -159,21 +141,40 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
       series.canonicalYear = parseInt(finalYear, 10);
     }
   }
-
   return finalBlueprint;
 }
 
+/**
+ * 创建链接的辅助函数
+ * @param source - 源文件
+ * @param destination - 目标链接路径
+ * @param linkType - 'soft' 或 'hard'
+ * @param pathMode - 'absolute' 或 'relative'
+ */
+async function createLink(source: string, destination: string, linkType: string, pathMode: string): Promise<void> {
+  let linkSource = source;
+  // 如果是软链接且需要相对路径，则计算相对路径
+  if (linkType === 'soft' && pathMode === 'relative') {
+    linkSource = path.relative(path.dirname(destination), source);
+  }
 
-// --- 阶段三: 生成最终目录结构 ---
+  try {
+    if (linkType === 'soft') {
+      await fs.symlink(linkSource, destination);
+    } else { // hard link
+      await fs.link(source, destination);
+    }
+  } catch (error: any) {
+    if (error.code !== 'EEXIST') {
+      console.error(`[错误] 创建 ${linkType} 链接失败 for ${source}:`, error);
+    }
+  }
+}
 
-// ++++++++++ 新增：定义需要保持同名的文件扩展名 ++++++++++
-const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.ssa', '.srt', '.sub', '.sup', '.vtt', '.lrc']);
-// +++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
+async function generateLinks(blueprint: MediaBlueprint, targetRootDir: string, linkType: string, pathMode: string): Promise<void> {
   for (const series of Object.values(blueprint)) {
     if (!series.canonicalTitle) continue;
-
     const cleanTitle = series.canonicalTitle.replace(/[<>:"/\\|?*]/g, '').trim();
     let seriesDirName = cleanTitle;
     if (series.type === 'movie' && series.canonicalYear) {
@@ -181,11 +182,9 @@ async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string
     }
     const seriesPath = path.join(targetRootDir, seriesDirName);
     await fs.mkdir(seriesPath, { recursive: true });
-
     for (const item of series.items) {
       let targetPath = seriesPath;
       let newBaseFilename: string;
-
       if (series.type === 'show') {
         if (item.season == null || item.episode == null) continue;
         const seasonStr = String(item.season).padStart(2, '0');
@@ -196,50 +195,36 @@ async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string
       } else {
         newBaseFilename = seriesDirName;
       }
-
       await fs.mkdir(targetPath, { recursive: true });
-
       const videoExt = path.extname(item.videoFile.originalFilename);
-      await createSymlink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`));
-
+      await createLink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`), linkType, pathMode);
       for (const file of item.sidecarFiles) {
         const sidecarExt = path.extname(file.originalFilename).toLowerCase();
         let finalSidecarName: string;
-
-        // ++++++++++ 新增：判断文件命名规则 ++++++++++
         if (SAME_NAME_EXTENSIONS.has(sidecarExt)) {
-          // 如果是 nfo, ass, srt 等文件，则直接使用同名
           finalSidecarName = `${newBaseFilename}${sidecarExt}`;
         } else {
-          // 否则，使用 AI 分析的角色作为后缀
           const roleSuffix = file.role ? `-${file.role}` : '';
           finalSidecarName = `${newBaseFilename}${roleSuffix}${sidecarExt}`;
         }
-        // +++++++++++++++++++++++++++++++++++++++++++++++
-
-        await createSymlink(file.sourcePath, path.join(targetPath, finalSidecarName));
+        await createLink(file.sourcePath, path.join(targetPath, finalSidecarName), linkType, pathMode);
       }
     }
     console.log(`[成功] 已为 "${series.canonicalTitle}" 创建整理好的链接。`);
   }
 }
 
-async function createSymlink(source: string, destination: string): Promise<void> {
-  try {
-    await fs.symlink(source, destination);
-  } catch (error: any) {
-    if (error.code !== 'EEXIST') {
-      console.error(`[错误] 创建链接失败 for ${source}:`, error);
-    }
-  }
-}
-
-// --- 主函数 ---
-
-export async function organizeMediaLibrary(sourceDir: string, targetDir: string, isDebugMode: boolean, concurrency: number): Promise<void> {
-  console.log('--- 阶段 1: 开始扫描和初步分析文件... ---');
+/**
+ * 主函数
+ * @param sourceDirs - 一个或多个源目录
+ */
+export async function organizeMediaLibrary(sourceDirs: string[], targetDir: string, isDebugMode: boolean, concurrency: number, linkType: string, pathMode: string): Promise<void> {
+  console.log('--- 阶段 1: 开始扫描和分析文件... ---');
   const rawBlueprint: MediaBlueprint = {};
-  await scanDirectory(sourceDir, rawBlueprint, concurrency);
+  // 更新：遍历所有提供的源目录
+  for (const sourceDir of sourceDirs) {
+    await scanDirectory(sourceDir, rawBlueprint, concurrency);
+  }
   console.log('--- 阶段 1: 完成 ---');
 
   console.log('\n--- 阶段 2: 开始进行 AI 宏观整理... ---');
@@ -251,8 +236,8 @@ export async function organizeMediaLibrary(sourceDir: string, targetDir: string,
     console.log(`\n--- 调试模式: 将把最终的整理计划写入 ${debugFilePath} ---`);
     await fs.writeFile(debugFilePath, JSON.stringify(finalBlueprint, null, 2));
   } else {
-    console.log('\n--- 阶段 3: 开始创建软链接... ---');
-    await generateSymlinks(finalBlueprint, targetDir);
+    console.log('\n--- 阶段 3: 开始创建链接... ---');
+    await generateLinks(finalBlueprint, targetDir, linkType, pathMode);
     console.log('--- 阶段 3: 完成 ---');
   }
 }
