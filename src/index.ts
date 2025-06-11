@@ -1,12 +1,13 @@
 import { Command } from 'commander';
 import path from 'path';
 import fs from 'fs/promises';
+import os from 'os'; // 新增：导入os模块以获取主目录
 import { organizeMediaLibrary } from './organizer.js';
 
 const program = new Command();
 
 program
-  .version('2.3.1') // 版本升级，调整调试日志输出路径
+  .version('2.5.2') // 版本升级，修复路径处理
   .description('使用AI并行整理媒体文件，合并系列，并为Jellyfin创建标准化的软/硬链接。')
   .requiredOption('-s, --source <paths...>', '一个或多个源文件夹路径')
   .requiredOption('-t, --target <path>', '用于存放链接的目标文件夹路径')
@@ -20,16 +21,25 @@ program.parse(process.argv);
 
 const options = program.opts();
 
-const sourcePaths = options.source.map((p: string) => path.resolve(p));
-const targetPath = path.resolve(options.target);
+// +++ 新增：一个辅助函数，用于将路径中的~符号扩展为用户主目录 +++
+function expandTilde(filePath: string): string {
+  if (filePath && filePath.startsWith('~/')) {
+    return path.join(os.homedir(), filePath.slice(2));
+  }
+  return filePath;
+}
+
+// +++ 修改：在解析路径前，先对用户输入的路径进行~扩展 +++
+const sourcePaths = options.source.map((p: string) => path.resolve(expandTilde(p)));
+const targetPath = path.resolve(expandTilde(options.target));
+// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
 const isDebugMode = !!options.debug;
 const concurrency = parseInt(options.concurrency, 10);
 const linkType = options.linkType;
 const pathMode = options.pathMode;
 
-/**
- * 执行预检
- */
+
 async function preflightCheck(sourceDirs: string[], targetDir: string): Promise<boolean> {
   console.log('--- 开始执行预检 ---');
   let checksPassed = true;
@@ -84,9 +94,7 @@ async function preflightCheck(sourceDirs: string[], targetDir: string): Promise<
   return checksPassed;
 }
 
-/**
- * 主函数
- */
+
 async function main() {
   console.log(`源路径: ${sourcePaths.join(', ')}`);
   console.log(`目标路径: ${targetPath}`);
@@ -109,8 +117,6 @@ async function main() {
   console.log('\n处理完成。');
 }
 
-// 核心整理函数现在直接在 organizeMediaLibrary 中处理调试日志的写入
-// 这让主逻辑更清晰
 main().catch(error => {
   console.error('\n发生意外错误:', error);
   process.exit(1);
