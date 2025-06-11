@@ -191,7 +191,9 @@ async function generateLinks(blueprint: MediaBlueprint, targetRootDir: string, l
         const episodeStr = String(item.episode).padStart(2, '0');
         const seasonDir = `Season ${seasonStr}`;
         targetPath = path.join(seriesPath, seasonDir);
-        newBaseFilename = `${cleanTitle} - S${seasonStr}E${episodeStr}`;
+        // ++++++++++ 修改：移除文件名中的 '-' 分隔符 ++++++++++
+        newBaseFilename = `${cleanTitle} S${seasonStr}E${episodeStr}`;
+        // +++++++++++++++++++++++++++++++++++++++++++++++
       } else {
         newBaseFilename = seriesDirName;
       }
