@@ -6,10 +6,12 @@ import { organizeMediaLibrary } from './organizer.js';
 const program = new Command();
 
 program
-  .version('2.0.0') // 版本升级
-  .description('使用AI整理媒体文件，合并系列，并为Jellyfin创建标准化的软链接')
+  .version('2.1.0') // 版本升级，支持并行处理
+  .description('使用AI并行整理媒体文件，合并系列，并为Jellyfin创建标准化的软链接')
   .requiredOption('-s, --source <path>', '源文件夹路径')
   .requiredOption('-t, --target <path>', '用于存放软链接的目标文件夹路径')
+  // 新增 --concurrency 选项
+  .option('-c, --concurrency <number>', '并行处理的并发请求数', '10')
   .option('--debug', '启用调试模式，不会创建软链接，而是生成一个包含整理计划的JSON文件');
 
 program.parse(process.argv);
@@ -19,6 +21,8 @@ const options = program.opts();
 const sourcePath = path.resolve(options.source);
 const targetPath = path.resolve(options.target);
 const isDebugMode = !!options.debug;
+// 解析并发数选项
+const concurrency = parseInt(options.concurrency, 10);
 
 /**
  * 主函数
@@ -26,6 +30,8 @@ const isDebugMode = !!options.debug;
 async function main() {
   console.log(`源路径: ${sourcePath}`);
   console.log(`目标路径: ${targetPath}`);
+  console.log(`并行数: ${concurrency}`);
+
 
   if (isDebugMode) {
     console.log('*** 调试模式已启用 ***');
@@ -51,8 +57,8 @@ async function main() {
     process.exit(1);
   }
 
-  // 调用新的核心整理函数
-  await organizeMediaLibrary(sourcePath, targetPath, isDebugMode);
+  // 调用核心整理函数，并传入并发数
+  await organizeMediaLibrary(sourcePath, targetPath, isDebugMode, concurrency);
 
   console.log('\n处理完成。');
 }
