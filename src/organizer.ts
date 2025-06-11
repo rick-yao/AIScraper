@@ -1,18 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { analyzeAndFormatFilename } from './nameParser.js';
+import { analyzeAndFormatFilename, analyzeAuxiliaryFileRole } from './nameParser.js';
 import { MediaBlueprint, EpisodeOrMovie, MediaFile, MediaSeries } from './types.js';
 
 const VIDEO_EXTENSIONS = new Set(['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.rmvb']);
 
-// --- 阶段一: 扫描与信息采集 (Scan & Gather) ---
+// --- 阶段一: 扫描与信息采集 ---
 
-/**
- * 递归扫描源目录，构建媒体库蓝图
- * @param dir - 当前要扫描的目录
- * @param blueprint - 要填充的媒体蓝图对象
- * @param concurrency - 并行处理数
- */
 async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency: number): Promise<void> {
   console.log(`[扫描] 进入目录: ${dir}`);
   let entries;
@@ -20,14 +14,13 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (err) {
     console.error(`[错误] 无法读取目录 ${dir}:`, err);
-    return; // 无法读取目录则跳过
+    return;
   }
 
-  // 1. 将目录下的所有文件按文件名（不含扩展名）分组
   const fileGroups = new Map<string, MediaFile[]>();
   for (const entry of entries) {
     if (entry.isFile()) {
-      const baseName = path.parse(entry.name).name.replace(/-thumb$/, '');
+      const baseName = path.parse(entry.name).name;
       if (!fileGroups.has(baseName)) {
         fileGroups.set(baseName, []);
       }
@@ -38,40 +31,46 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
     }
   }
 
-  // 2. 为当前目录的所有视频文件创建分析任务
-  const tasksInThisDir: { videoFile: MediaFile; sidecarFiles: MediaFile[] }[] = [];
-  for (const files of fileGroups.values()) {
+  // 从文件组中提取出需要分析的视频任务
+  const videoTasks = Array.from(fileGroups.values()).map(files => {
     const videoFile = files.find(f => VIDEO_EXTENSIONS.has(path.extname(f.originalFilename).toLowerCase()));
-    if (videoFile) {
-      tasksInThisDir.push({
-        videoFile: videoFile,
-        sidecarFiles: files.filter(f => f.sourcePath !== videoFile.sourcePath),
-      });
-    }
-  }
+    if (!videoFile) return null;
+    return {
+      videoFile,
+      sidecarFiles: files.filter(f => f.sourcePath !== videoFile.sourcePath),
+    };
+  }).filter(task => task !== null) as { videoFile: MediaFile; sidecarFiles: MediaFile[] }[];
 
-  // 3. 并行处理这些任务
-  console.log(`[信息] 在 ${dir} 中发现 ${tasksInThisDir.length} 个视频文件组需要分析。`);
-  for (let i = 0; i < tasksInThisDir.length; i += concurrency) {
-    const chunk = tasksInThisDir.slice(i, i + concurrency);
-    console.log(`[并行分析] 正在处理 ${chunk.length} 个文件... (进度: ${i + chunk.length}/${tasksInThisDir.length})`);
+  console.log(`[信息] 在 ${dir} 中发现 ${videoTasks.length} 个视频文件组需要分析。`);
+  for (let i = 0; i < videoTasks.length; i += concurrency) {
+    const chunk = videoTasks.slice(i, i + concurrency);
+    console.log(`[并行分析] 正在处理 ${chunk.length} 个文件... (进度: ${i + chunk.length}/${videoTasks.length})`);
 
     const promises = chunk.map(async ({ videoFile, sidecarFiles }) => {
+      // 1. 分析主视频文件
       const parentDir = path.basename(path.dirname(videoFile.sourcePath));
-      const { aiInfo } = await analyzeAndFormatFilename(videoFile.originalFilename, parentDir);
-      if (aiInfo && aiInfo.type !== 'unknown') {
-        return {
-          season: aiInfo.season,
-          episode: aiInfo.episode,
-          videoFile,
-          sidecarFiles,
-          aiInfo,
-        } as EpisodeOrMovie;
-      }
-      return null;
+      const analysisResult = await analyzeAndFormatFilename(videoFile.originalFilename, parentDir);
+
+      if (!analysisResult.aiInfo || !analysisResult.newFilename) return null;
+
+      // 2. 并行分析所有辅助文件的角色
+      const sidecarPromises = sidecarFiles.map(async (file) => {
+        const role = await analyzeAuxiliaryFileRole(analysisResult.newFilename!, file.originalFilename);
+        file.role = role; // 将分析出的角色存入文件对象
+        return file;
+      });
+
+      const processedSidecars = await Promise.all(sidecarPromises);
+
+      return {
+        season: analysisResult.aiInfo.season,
+        episode: analysisResult.aiInfo.episode,
+        videoFile: videoFile,
+        sidecarFiles: processedSidecars,
+        aiInfo: analysisResult.aiInfo,
+      } as EpisodeOrMovie;
     });
 
-    // 使用 allSettled 保证即使有单个任务失败，其他任务也能继续
     const chunkResults = await Promise.allSettled(promises);
 
     chunkResults.forEach(result => {
@@ -83,7 +82,6 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
     });
   }
 
-  // 4. 递归处理子目录
   for (const entry of entries) {
     if (entry.isDirectory()) {
       await scanDirectory(path.join(dir, entry.name), blueprint, concurrency);
@@ -91,10 +89,55 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
   }
 }
 
+// --- 阶段三: 生成最终目录结构 ---
 
-/**
- * 将单个剧集/电影信息添加到总蓝图中 (此函数及以下函数均保持不变)
- */
+async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
+  for (const series of Object.values(blueprint)) {
+    const cleanTitle = series.canonicalTitle!.replace(/[<>:"/\\|?*]/g, '').trim();
+    let seriesDirName = cleanTitle;
+    if (series.type === 'movie' && series.canonicalYear) {
+      seriesDirName = `${cleanTitle} (${series.canonicalYear})`;
+    }
+    const seriesPath = path.join(targetRootDir, seriesDirName);
+    await fs.mkdir(seriesPath, { recursive: true });
+
+    for (const item of series.items) {
+      let targetPath = seriesPath;
+      let newBaseFilename: string;
+
+      if (series.type === 'show') {
+        if (item.season == null || item.episode == null) continue;
+        const seasonStr = String(item.season).padStart(2, '0');
+        const episodeStr = String(item.episode).padStart(2, '0');
+        const seasonDir = `Season ${seasonStr}`;
+        targetPath = path.join(seriesPath, seasonDir);
+        newBaseFilename = `${cleanTitle} - S${seasonStr}E${episodeStr}`;
+      } else {
+        newBaseFilename = seriesDirName;
+      }
+
+      await fs.mkdir(targetPath, { recursive: true });
+
+      // 链接主视频文件
+      const videoExt = path.extname(item.videoFile.originalFilename);
+      await createSymlink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`));
+
+      // 链接所有辅助文件
+      for (const file of item.sidecarFiles) {
+        const sidecarExt = path.extname(file.originalFilename);
+        // 新逻辑：如果文件有角色，则添加为后缀
+        const roleSuffix = file.role ? `-${file.role}` : '';
+        const finalSidecarName = `${newBaseFilename}${roleSuffix}${sidecarExt}`;
+        await createSymlink(file.sourcePath, path.join(targetPath, finalSidecarName));
+      }
+    }
+    console.log(`[成功] 已为 "${series.canonicalTitle}" 创建整理好的链接。`);
+  }
+}
+
+// 以下函数保持不变...
+
+// addToBlueprint, consolidateBlueprint, getMostVoted, createSymlink, organizeMediaLibrary ...
 function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
   if (item.aiInfo.type === 'unknown') {
     return;
@@ -155,41 +198,6 @@ function consolidateBlueprint(blueprint: MediaBlueprint): MediaBlueprint {
   return finalBlueprint;
 }
 
-async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
-  for (const series of Object.values(blueprint)) {
-    const cleanTitle = series.canonicalTitle!.replace(/[<>:"/\\|?*]/g, '').trim();
-    let seriesDirName = cleanTitle;
-    if (series.type === 'movie' && series.canonicalYear) {
-      seriesDirName = `${cleanTitle} (${series.canonicalYear})`;
-    }
-    const seriesPath = path.join(targetRootDir, seriesDirName);
-    await fs.mkdir(seriesPath, { recursive: true });
-    for (const item of series.items) {
-      let targetPath = seriesPath;
-      let newBaseFilename: string;
-      if (series.type === 'show') {
-        if (item.season == null || item.episode == null) continue;
-        const seasonStr = String(item.season).padStart(2, '0');
-        const episodeStr = String(item.episode).padStart(2, '0');
-        const seasonDir = `Season ${seasonStr}`;
-        targetPath = path.join(seriesPath, seasonDir);
-        newBaseFilename = `${cleanTitle} - S${seasonStr}E${episodeStr}`;
-      } else {
-        newBaseFilename = seriesDirName;
-      }
-      await fs.mkdir(targetPath, { recursive: true });
-      const videoExt = path.extname(item.videoFile.originalFilename);
-      await createSymlink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`));
-      for (const file of item.sidecarFiles) {
-        const sidecarExt = path.extname(file.originalFilename);
-        const specialSuffix = file.originalFilename.match(/-thumb\.jpg$/i) ? '-thumb' : '';
-        await createSymlink(file.sourcePath, path.join(targetPath, `${newBaseFilename}${specialSuffix}${sidecarExt}`));
-      }
-    }
-    console.log(`[成功] 已为 "${series.canonicalTitle}" 创建整理好的链接。`);
-  }
-}
-
 async function createSymlink(source: string, destination: string): Promise<void> {
   try {
     await fs.symlink(source, destination);
@@ -201,9 +209,6 @@ async function createSymlink(source: string, destination: string): Promise<void>
   }
 }
 
-/**
- * 运行整理媒体库的完整流程
- */
 export async function organizeMediaLibrary(sourceDir: string, targetDir: string, isDebugMode: boolean, concurrency: number): Promise<void> {
   console.log('--- 阶段 1: 开始扫描和分析文件... ---');
   const rawBlueprint: MediaBlueprint = {};

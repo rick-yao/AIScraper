@@ -15,6 +15,8 @@ export type MediaInfo = {
 export interface MediaFile {
   sourcePath: string; // 源文件完整路径
   originalFilename: string; // 原始文件名
+  // 新增：用于存储AI分析出的文件角色，如 'thumb', 'poster', 'subtitle'
+  role?: string | null;
 }
 
 /**
