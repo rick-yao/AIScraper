@@ -120,7 +120,6 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
   console.log('[整理] 发现以下初步标题:', titles);
   console.log('[整理] 正在调用 AI 进行最终的标题合并...');
 
-  // 1. 调用 AI 获取所有标题到“官方标题”的映射
   const canonicalTitleMap = await getCanonicalTitleMapping(titles);
   if (!canonicalTitleMap) {
     console.error('[错误] 无法从 AI 获取标题映射，将跳过整理步骤。');
@@ -131,32 +130,28 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
 
   const finalBlueprint: MediaBlueprint = {};
 
-  // 2. 根据 AI 的映射来合并剧集
   for (const originalTitle in canonicalTitleMap) {
     const canonicalTitle = canonicalTitleMap[originalTitle];
     const seriesToMerge = rawBlueprint[originalTitle];
 
     if (!seriesToMerge) continue;
 
-    // 如果最终蓝图中还没有这个官方标题的条目，则创建它
     if (!finalBlueprint[canonicalTitle]) {
       finalBlueprint[canonicalTitle] = {
         canonicalTitle: canonicalTitle,
         items: [],
         titleVotes: {},
         yearVotes: {},
-        type: seriesToMerge.type, // 假设同一剧集的 type 都是一致的
+        type: seriesToMerge.type,
       };
     }
 
-    // 将当前剧集的数据合并到官方标题的条目下
     const targetSeries = finalBlueprint[canonicalTitle];
     targetSeries.items.push(...seriesToMerge.items);
     Object.assign(targetSeries.titleVotes, seriesToMerge.titleVotes);
     Object.assign(targetSeries.yearVotes, seriesToMerge.yearVotes);
   }
 
-  // 3. 为每个合并后的剧集确定最终年份
   for (const series of Object.values(finalBlueprint)) {
     const yearVotes = series.yearVotes;
     if (Object.keys(yearVotes).length > 0) {
@@ -170,6 +165,10 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
 
 
 // --- 阶段三: 生成最终目录结构 ---
+
+// ++++++++++ 新增：定义需要保持同名的文件扩展名 ++++++++++
+const SAME_NAME_EXTENSIONS = new Set(['.nfo', '.ass', '.srt', '.sup']);
+// +++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
   for (const series of Object.values(blueprint)) {
@@ -204,9 +203,20 @@ async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string
       await createSymlink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`));
 
       for (const file of item.sidecarFiles) {
-        const sidecarExt = path.extname(file.originalFilename);
-        const roleSuffix = file.role ? `-${file.role}` : '';
-        const finalSidecarName = `${newBaseFilename}${roleSuffix}${sidecarExt}`;
+        const sidecarExt = path.extname(file.originalFilename).toLowerCase();
+        let finalSidecarName: string;
+
+        // ++++++++++ 新增：判断文件命名规则 ++++++++++
+        if (SAME_NAME_EXTENSIONS.has(sidecarExt)) {
+          // 如果是 nfo, ass, srt 等文件，则直接使用同名
+          finalSidecarName = `${newBaseFilename}${sidecarExt}`;
+        } else {
+          // 否则，使用 AI 分析的角色作为后缀
+          const roleSuffix = file.role ? `-${file.role}` : '';
+          finalSidecarName = `${newBaseFilename}${roleSuffix}${sidecarExt}`;
+        }
+        // +++++++++++++++++++++++++++++++++++++++++++++++
+
         await createSymlink(file.sourcePath, path.join(targetPath, finalSidecarName));
       }
     }
