@@ -144,24 +144,15 @@ async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<Media
   return finalBlueprint;
 }
 
-/**
- * 创建链接的辅助函数
- * @param source - 源文件
- * @param destination - 目标链接路径
- * @param linkType - 'soft' 或 'hard'
- * @param pathMode - 'absolute' 或 'relative'
- */
 async function createLink(source: string, destination: string, linkType: string, pathMode: string): Promise<void> {
   let linkSource = source;
-  // 如果是软链接且需要相对路径，则计算相对路径
   if (linkType === 'soft' && pathMode === 'relative') {
     linkSource = path.relative(path.dirname(destination), source);
   }
-
   try {
     if (linkType === 'soft') {
       await fs.symlink(linkSource, destination);
-    } else { // hard link
+    } else {
       await fs.link(source, destination);
     }
   } catch (error: any) {
@@ -214,14 +205,9 @@ async function generateLinks(blueprint: MediaBlueprint, targetRootDir: string, l
   }
 }
 
-/**
- * 主函数
- * @param sourceDirs - 一个或多个源目录
- */
 export async function organizeMediaLibrary(sourceDirs: string[], targetDir: string, isDebugMode: boolean, concurrency: number, linkType: string, pathMode: string): Promise<void> {
   console.log('--- 阶段 1: 开始扫描和分析文件... ---');
   const rawBlueprint: MediaBlueprint = {};
-  // 更新：遍历所有提供的源目录
   for (const sourceDir of sourceDirs) {
     await scanDirectory(sourceDir, rawBlueprint, concurrency);
   }
@@ -232,9 +218,14 @@ export async function organizeMediaLibrary(sourceDirs: string[], targetDir: stri
   console.log('--- 阶段 2: 完成 ---');
 
   if (isDebugMode) {
-    const debugFilePath = path.join(targetDir, 'debug_log_organized.json');
-    console.log(`\n--- 调试模式: 将把最终的整理计划写入 ${debugFilePath} ---`);
-    await fs.writeFile(debugFilePath, JSON.stringify(finalBlueprint, null, 2));
+    // 更新：使用 process.cwd() 获取当前执行目录
+    const debugFilePath = path.join(process.cwd(), 'debug_log_organized.json');
+    console.log(`\n--- 调试模式: 将把最终的整理计划写入当前执行目录: ${debugFilePath} ---`);
+    try {
+      await fs.writeFile(debugFilePath, JSON.stringify(finalBlueprint, null, 2));
+    } catch (error) {
+      console.error(`错误: 无法写入调试日志文件到 ${debugFilePath}`, error);
+    }
   } else {
     console.log('\n--- 阶段 3: 开始创建链接... ---');
     await generateLinks(finalBlueprint, targetDir, linkType, pathMode);
