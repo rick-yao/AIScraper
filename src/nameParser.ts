@@ -11,6 +11,10 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 const API_KEY = process.env.AI_SCRAPER_API_KEY;
+if (!API_KEY) {
+  console.error("致命错误: 环境变量 AI_SCRAPER_API_KEY 未设置。");
+  process.exit(1);
+}
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 
 // --- 视频文件分析 ---
@@ -60,7 +64,7 @@ export async function analyzeAndFormatFilename(originalFilename: string, parentD
   return { newFilename, aiInfo: info };
 }
 
-// --- 新增：辅助文件角色分析 ---
+// --- 辅助文件角色分析 ---
 
 const auxFileRoleSchema = z.object({
   role: z.string().nullable().describe("文件的角色，例如 'thumb', 'poster', 'fanart', 'subtitle', 'nfo'。如果无法识别特殊角色，则为 null。"),
@@ -70,7 +74,6 @@ function buildAuxiliaryPrompt(standardBaseName: string, auxiliaryFilename: strin
   return `你是一个文件组织专家。你的任务是识别一个辅助文件的具体角色。
     - 标准文件名（不含后缀）: "${standardBaseName}"
     - 需要分析的辅助文件名: "${auxiliaryFilename}"
-
     请判断这个辅助文件的角色：
     - 如果是缩略图，返回 "thumb"。
     - 如果是海报，返回 "poster"。
@@ -78,16 +81,9 @@ function buildAuxiliaryPrompt(standardBaseName: string, auxiliaryFilename: strin
     - 如果是字幕文件 (.srt, .ass, .sup)，返回 "subtitle"。
     - 如果是信息文件 (.nfo)，返回 "nfo"。
     - 如果无法识别任何特殊角色，或它只是一个普通的同名文件，请返回 null。
-    
     请只返回一个符合Schema的JSON对象。`;
 }
 
-/**
- * 新增函数：分析辅助文件的角色
- * @param standardBaseName - 标准化的基础文件名 (例如 "Rick and Morty - S01E01")
- * @param auxiliaryFilename - 原始的辅助文件名
- * @returns {Promise<string | null>} - 文件的角色或null
- */
 export async function analyzeAuxiliaryFileRole(standardBaseName: string, auxiliaryFilename: string): Promise<string | null> {
   try {
     const { object } = await generateObject({
@@ -101,6 +97,43 @@ export async function analyzeAuxiliaryFileRole(standardBaseName: string, auxilia
     return null;
   }
 }
+
+// --- 新增：宏观标题整理 ---
+
+const canonicalTitleSchema = z.record(z.string(), z.string().describe("最终的、标准的英文剧集标题。"));
+
+function buildCanonicalTitlePrompt(titles: string[]): string {
+  return `你是一个媒体库整理专家。这里有一个从文件名中提取出的剧集标题列表，其中可能包含同一部剧集的多种语言或不同命名方式。
+  你的任务是将它们分组，并为每一组确定一个唯一的、标准的英文名称作为“官方标题”。
+
+  标题列表:
+  ${titles.map(t => `- ${t}`).join('\n')}
+
+  请返回一个JSON对象，其中每个键是原始列表中的一个标题，其对应的值是该标题所属剧集的“官方标题”。
+  例如，如果输入包含 "瑞克和莫蒂" 和 "Rick and Morty"，你的返回应该类似 {"瑞克和莫蒂": "Rick and Morty", "Rick and Morty": "Rick and Morty"}。
+  对于像 "DAN.DA.DAN" 和 "DAN DA DAN" 这样的，请统一为 "Dan Da Dan"。`;
+}
+
+/**
+ * 新增函数：获取原始标题到官方标题的映射
+ * @param titles - 从文件中分析出的所有唯一标题的列表
+ * @returns {Promise<Record<string, string> | null>} - 一个映射对象
+ */
+export async function getCanonicalTitleMapping(titles: string[]): Promise<Record<string, string> | null> {
+  try {
+    const { object } = await generateObject({
+      model: google('models/gemini-1.5-flash'),
+      schema: canonicalTitleSchema,
+      prompt: buildCanonicalTitlePrompt(titles),
+      mode: 'json'
+    });
+    return object;
+  } catch (error) {
+    console.error('[错误] 在进行宏观标题整理时调用 AI 失败:', error);
+    return null;
+  }
+}
+
 
 // --- 通用函数 ---
 

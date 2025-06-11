@@ -1,11 +1,11 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { analyzeAndFormatFilename, analyzeAuxiliaryFileRole } from './nameParser.js';
+import { analyzeAndFormatFilename, analyzeAuxiliaryFileRole, getCanonicalTitleMapping } from './nameParser.js';
 import { MediaBlueprint, EpisodeOrMovie, MediaFile, MediaSeries } from './types.js';
 
 const VIDEO_EXTENSIONS = new Set(['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.rmvb']);
 
-// --- 阶段一: 扫描与信息采集 ---
+// --- 阶段一: 扫描与初步分析 ---
 
 async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency: number): Promise<void> {
   console.log(`[扫描] 进入目录: ${dir}`);
@@ -31,7 +31,6 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
     }
   }
 
-  // 从文件组中提取出需要分析的视频任务
   const videoTasks = Array.from(fileGroups.values()).map(files => {
     const videoFile = files.find(f => VIDEO_EXTENSIONS.has(path.extname(f.originalFilename).toLowerCase()));
     if (!videoFile) return null;
@@ -41,22 +40,23 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
     };
   }).filter(task => task !== null) as { videoFile: MediaFile; sidecarFiles: MediaFile[] }[];
 
-  console.log(`[信息] 在 ${dir} 中发现 ${videoTasks.length} 个视频文件组需要分析。`);
+  if (videoTasks.length > 0) {
+    console.log(`[信息] 在 ${dir} 中发现 ${videoTasks.length} 个视频文件组需要分析。`);
+  }
+
   for (let i = 0; i < videoTasks.length; i += concurrency) {
     const chunk = videoTasks.slice(i, i + concurrency);
     console.log(`[并行分析] 正在处理 ${chunk.length} 个文件... (进度: ${i + chunk.length}/${videoTasks.length})`);
 
     const promises = chunk.map(async ({ videoFile, sidecarFiles }) => {
-      // 1. 分析主视频文件
       const parentDir = path.basename(path.dirname(videoFile.sourcePath));
       const analysisResult = await analyzeAndFormatFilename(videoFile.originalFilename, parentDir);
 
       if (!analysisResult.aiInfo || !analysisResult.newFilename) return null;
 
-      // 2. 并行分析所有辅助文件的角色
       const sidecarPromises = sidecarFiles.map(async (file) => {
         const role = await analyzeAuxiliaryFileRole(analysisResult.newFilename!, file.originalFilename);
-        file.role = role; // 将分析出的角色存入文件对象
+        file.role = role;
         return file;
       });
 
@@ -89,11 +89,93 @@ async function scanDirectory(dir: string, blueprint: MediaBlueprint, concurrency
   }
 }
 
+function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
+  if (item.aiInfo.type === 'unknown') return;
+
+  const title = item.aiInfo.title;
+  if (!blueprint[title]) {
+    blueprint[title] = {
+      titleVotes: {},
+      yearVotes: {},
+      items: [],
+      type: item.aiInfo.type,
+    };
+  }
+  const series = blueprint[title];
+  series.items.push(item);
+  series.titleVotes[title] = (series.titleVotes[title] || 0) + 1;
+  if (item.aiInfo.year != null) {
+    series.yearVotes[String(item.aiInfo.year)] = (series.yearVotes[String(item.aiInfo.year)] || 0) + 1;
+  }
+}
+
+// --- 阶段二: AI 驱动的宏观整理 ---
+
+async function consolidateBlueprint(rawBlueprint: MediaBlueprint): Promise<MediaBlueprint> {
+  const titles = Object.keys(rawBlueprint);
+  if (titles.length === 0) {
+    return {};
+  }
+
+  console.log('[整理] 发现以下初步标题:', titles);
+  console.log('[整理] 正在调用 AI 进行最终的标题合并...');
+
+  // 1. 调用 AI 获取所有标题到“官方标题”的映射
+  const canonicalTitleMap = await getCanonicalTitleMapping(titles);
+  if (!canonicalTitleMap) {
+    console.error('[错误] 无法从 AI 获取标题映射，将跳过整理步骤。');
+    return rawBlueprint;
+  }
+
+  console.log('[整理] AI 返回的整理计划:', canonicalTitleMap);
+
+  const finalBlueprint: MediaBlueprint = {};
+
+  // 2. 根据 AI 的映射来合并剧集
+  for (const originalTitle in canonicalTitleMap) {
+    const canonicalTitle = canonicalTitleMap[originalTitle];
+    const seriesToMerge = rawBlueprint[originalTitle];
+
+    if (!seriesToMerge) continue;
+
+    // 如果最终蓝图中还没有这个官方标题的条目，则创建它
+    if (!finalBlueprint[canonicalTitle]) {
+      finalBlueprint[canonicalTitle] = {
+        canonicalTitle: canonicalTitle,
+        items: [],
+        titleVotes: {},
+        yearVotes: {},
+        type: seriesToMerge.type, // 假设同一剧集的 type 都是一致的
+      };
+    }
+
+    // 将当前剧集的数据合并到官方标题的条目下
+    const targetSeries = finalBlueprint[canonicalTitle];
+    targetSeries.items.push(...seriesToMerge.items);
+    Object.assign(targetSeries.titleVotes, seriesToMerge.titleVotes);
+    Object.assign(targetSeries.yearVotes, seriesToMerge.yearVotes);
+  }
+
+  // 3. 为每个合并后的剧集确定最终年份
+  for (const series of Object.values(finalBlueprint)) {
+    const yearVotes = series.yearVotes;
+    if (Object.keys(yearVotes).length > 0) {
+      const finalYear = Object.entries(yearVotes).reduce((a, b) => a[1] > b[1] ? a : b)[0];
+      series.canonicalYear = parseInt(finalYear, 10);
+    }
+  }
+
+  return finalBlueprint;
+}
+
+
 // --- 阶段三: 生成最终目录结构 ---
 
 async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string): Promise<void> {
   for (const series of Object.values(blueprint)) {
-    const cleanTitle = series.canonicalTitle!.replace(/[<>:"/\\|?*]/g, '').trim();
+    if (!series.canonicalTitle) continue;
+
+    const cleanTitle = series.canonicalTitle.replace(/[<>:"/\\|?*]/g, '').trim();
     let seriesDirName = cleanTitle;
     if (series.type === 'movie' && series.canonicalYear) {
       seriesDirName = `${cleanTitle} (${series.canonicalYear})`;
@@ -118,14 +200,11 @@ async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string
 
       await fs.mkdir(targetPath, { recursive: true });
 
-      // 链接主视频文件
       const videoExt = path.extname(item.videoFile.originalFilename);
       await createSymlink(item.videoFile.sourcePath, path.join(targetPath, `${newBaseFilename}${videoExt}`));
 
-      // 链接所有辅助文件
       for (const file of item.sidecarFiles) {
         const sidecarExt = path.extname(file.originalFilename);
-        // 新逻辑：如果文件有角色，则添加为后缀
         const roleSuffix = file.role ? `-${file.role}` : '';
         const finalSidecarName = `${newBaseFilename}${roleSuffix}${sidecarExt}`;
         await createSymlink(file.sourcePath, path.join(targetPath, finalSidecarName));
@@ -135,97 +214,35 @@ async function generateSymlinks(blueprint: MediaBlueprint, targetRootDir: string
   }
 }
 
-// 以下函数保持不变...
-
-// addToBlueprint, consolidateBlueprint, getMostVoted, createSymlink, organizeMediaLibrary ...
-function addToBlueprint(blueprint: MediaBlueprint, item: EpisodeOrMovie): void {
-  if (item.aiInfo.type === 'unknown') {
-    return;
-  }
-  const title = item.aiInfo.title;
-  const year = item.aiInfo.year;
-  if (!blueprint[title]) {
-    blueprint[title] = {
-      titleVotes: {},
-      yearVotes: {},
-      items: [],
-      type: item.aiInfo.type,
-    };
-  }
-  const series = blueprint[title];
-  series.items.push(item);
-  series.titleVotes[title] = (series.titleVotes[title] || 0) + 1;
-  if (year != null) {
-    series.yearVotes[String(year)] = (series.yearVotes[String(year)] || 0) + 1;
-  }
-}
-
-function getMostVoted(votes: Record<string, number>): string | null {
-  if (Object.keys(votes).length === 0) return null;
-  return Object.entries(votes).reduce((a, b) => a[1] > b[1] ? a : b)[0];
-}
-
-function consolidateBlueprint(blueprint: MediaBlueprint): MediaBlueprint {
-  const consolidated = new Map<string, MediaSeries>();
-  for (const series of Object.values(blueprint)) {
-    const representativeTitle = getMostVoted(series.titleVotes);
-    if (!representativeTitle) continue;
-    const existingSeries = consolidated.get(representativeTitle);
-    if (existingSeries) {
-      existingSeries.items.push(...series.items);
-      Object.entries(series.titleVotes).forEach(([title, count]) => {
-        existingSeries.titleVotes[title] = (existingSeries.titleVotes[title] || 0) + count;
-      });
-      Object.entries(series.yearVotes).forEach(([year, count]) => {
-        existingSeries.yearVotes[year] = (existingSeries.yearVotes[year] || 0) + count;
-      });
-    } else {
-      consolidated.set(representativeTitle, series);
-    }
-  }
-  consolidated.forEach(series => {
-    const finalTitle = getMostVoted(series.titleVotes);
-    const finalYear = getMostVoted(series.yearVotes);
-    series.canonicalTitle = finalTitle ?? undefined;
-    series.canonicalYear = finalYear ? parseInt(finalYear, 10) : null;
-  });
-  const finalBlueprint: MediaBlueprint = {};
-  consolidated.forEach(series => {
-    if (series.canonicalTitle) {
-      finalBlueprint[series.canonicalTitle] = series;
-    }
-  });
-  return finalBlueprint;
-}
-
 async function createSymlink(source: string, destination: string): Promise<void> {
   try {
     await fs.symlink(source, destination);
   } catch (error: any) {
-    if (error.code === 'EEXIST') { }
-    else {
+    if (error.code !== 'EEXIST') {
       console.error(`[错误] 创建链接失败 for ${source}:`, error);
     }
   }
 }
 
+// --- 主函数 ---
+
 export async function organizeMediaLibrary(sourceDir: string, targetDir: string, isDebugMode: boolean, concurrency: number): Promise<void> {
-  console.log('--- 阶段 1: 开始扫描和分析文件... ---');
+  console.log('--- 阶段 1: 开始扫描和初步分析文件... ---');
   const rawBlueprint: MediaBlueprint = {};
   await scanDirectory(sourceDir, rawBlueprint, concurrency);
   console.log('--- 阶段 1: 完成 ---');
 
-  console.log('\n--- 阶段 2: 开始整理和合并媒体系列... ---');
-  const consolidatedBlueprint = consolidateBlueprint(rawBlueprint);
+  console.log('\n--- 阶段 2: 开始进行 AI 宏观整理... ---');
+  const finalBlueprint = await consolidateBlueprint(rawBlueprint);
   console.log('--- 阶段 2: 完成 ---');
 
   if (isDebugMode) {
     const debugFilePath = path.join(targetDir, 'debug_log_organized.json');
     console.log(`\n--- 调试模式: 将把最终的整理计划写入 ${debugFilePath} ---`);
-    await fs.writeFile(debugFilePath, JSON.stringify(consolidatedBlueprint, null, 2));
+    await fs.writeFile(debugFilePath, JSON.stringify(finalBlueprint, null, 2));
   } else {
     console.log('\n--- 阶段 3: 开始创建软链接... ---');
-    await generateSymlinks(consolidatedBlueprint, targetDir);
+    await generateSymlinks(finalBlueprint, targetDir);
     console.log('--- 阶段 3: 完成 ---');
   }
 }
