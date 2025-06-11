@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "NODE_NO_WARNINGS=1 node --loader ts-node/esm src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --outfile=dist/scraper.cjs"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +15,7 @@
   "packageManager": "pnpm@10.11.0",
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.25.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
