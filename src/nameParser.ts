@@ -35,9 +35,25 @@ export type AnalysisResult = {
   aiInfo: MediaInfo | null;
 }
 
+// ++++++++++ 修改：优化视频分析的指令 ++++++++++
 function buildVideoPrompt(filename: string, parentDir: string): string {
-  return `你是一个为Plex和Jellyfin服务的媒体文件整理专家。你的任务是分析视频文件名及其父目录，以提取结构化信息。请分析以下文件：\n- 文件名: "${filename}"\n- 父目录: "${parentDir}"\n请严格遵守规则：1.判断文件是电视剧集还是电影。2.对于电视剧，提取剧名、季号和集号。3.对于电影，提取电影名和上映年份。4. 'title'应为电视剧或电影的干净名称，删除所有附加信息。5.如果无法确定，将'type'设置为'unknown'。返回一个与所提供Schema匹配的JSON对象。`;
+  return `你是一个为Plex和Jellyfin服务的媒体文件整理专家。你的任务是从一个复杂的文件或目录名中，准确地提取出剧集或电影的官方名称。
+
+  请分析以下信息：
+  - 文件名: "${filename}"
+  - 父目录: "${parentDir}"
+
+  请严格遵守以下规则:
+  1. 核心任务是识别出**最主要的、最官方的那个标题**。文件名或目录名的开头部分通常包含了标题。
+  2. 标题可能同时包含**中文和英文**名称，并用点（.）分隔。例如，在 "苦尽柑来遇见你.When.Life.Gives.You.Tangerines.2025..." 这个例子中，"When Life Gives You Tangerines" 是更适合作为官方刮削的英文标题，请优先选择它。
+  3. 返回的 'title' 字段**必须**是干净的、被识别出的官方标题，不含任何技术参数、发布组信息、年份或其他语言的别名。
+  4. 提取季号（Season/S）和集号（Episode/E）。
+  5. 提取上映年份（通常是4位数字）。
+  6. 如果无法确定任何有效信息，将 'type' 设置为 'unknown'。
+
+  请返回一个与所提供Schema完全匹配的JSON对象，不要添加任何额外的文本或解释。`;
 }
+// +++++++++++++++++++++++++++++++++++++++++++++
 
 // 修改：增加 stats 参数
 async function getMediaInfo(filename: string, parentDir: string, stats: StatsCollector): Promise<MediaInfo | null> {
@@ -148,7 +164,8 @@ function formatNewFilename(info: MediaInfo, originalExt: string): string | null 
   if (info.type === 'show' && info.season != null && info.episode != null) {
     const seasonStr = String(info.season).padStart(2, '0');
     const episodeStr = String(info.episode).padStart(2, '0');
-    return `${cleanTitle} - S${seasonStr}E${episodeStr}`;
+    // 同样移除这里的 '-' 分隔符以匹配新规则
+    return `${cleanTitle} S${seasonStr}E${episodeStr}`;
   }
   if (info.type === 'movie' && info.year) {
     return `${cleanTitle} (${info.year})`;
