@@ -3,13 +3,13 @@ import path from 'path';
 import fs from 'fs/promises';
 import os from 'os';
 import { organizeMediaLibrary } from './organizer.js';
-import { StatsCollector } from './stats.js'; // 导入统计收集器
+import { StatsCollector } from './stats.js';
 
 const program = new Command();
 
 program
-  .version('2.6.0') // 版本升级，支持统计功能
-  .description('使用AI并行整理媒体文件，合并系列，并为Jellyfin创建标准化的软/硬链接。')
+  .version('3.0.0') // 版本升级：支持增量同步
+  .description('使用AI并行整理媒体文件，支持增量同步，合并系列，并为Jellyfin创建标准化的软/硬链接。')
   .requiredOption('-s, --source <paths...>', '一个或多个源文件夹路径')
   .requiredOption('-t, --target <path>', '用于存放链接的目标文件夹路径')
   .option('-l, --link-type <type>', '创建的链接类型 (soft 或 hard)', 'soft')
@@ -109,13 +109,10 @@ async function main() {
     console.log('*** 调试模式已启用 ***');
   }
 
-  // 创建统计收集器实例
   const stats = new StatsCollector();
 
-  // 将实例传递给核心整理函数
   await organizeMediaLibrary(sourcePaths, targetPath, isDebugMode, concurrency, linkType, pathMode, stats);
 
-  // 在程序最后打印报告
   stats.printReport();
 
   console.log('\n处理完成。');
